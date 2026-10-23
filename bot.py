@@ -46,8 +46,7 @@ def get_channel():
         raise RuntimeError(
             f"Channel @{CHANNEL_HANDLE} was not found. Check YOUTUBE_HANDLE and API key."
         )
-    channel = items[0]
-    return channel["contentDetails"]["relatedPlaylists"]["uploads"]
+    return items[0]["contentDetails"]["relatedPlaylists"]["uploads"]
 
 
 def get_latest_videos(uploads_playlist):
@@ -69,36 +68,22 @@ def get_latest_videos(uploads_playlist):
         "key": YOUTUBE_API_KEY,
     })
     by_id = {v["id"]: v for v in details.get("items", [])}
+
     videos = []
-    # Keep the playlist's newest-first ordering.
-    for item in items:
+    for item in items:  # playlist is newest-first
         vid = item.get("contentDetails", {}).get("videoId")
         if vid in by_id:
             videos.append(by_id[vid])
     return videos
 
 
-def parse_duration_seconds(duration):
-    # ISO 8601 duration such as PT1M23S or PT45S.
-    import re
-    match = re.fullmatch(
-        r"P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?",
-        duration or ""
-    )
-    if not match:
-        return 0
-    days, hours, minutes, seconds = (int(x or 0) for x in match.groups())
-    return days * 86400 + hours * 3600 + minutes * 60 + seconds
-
-
-def content_label(video):
-    duration = parse_duration_seconds(video.get("contentDetails", {}).get("duration"))
+def is_probable_short(video):
+    """The public API has no definitive Shorts flag.
+    Only label it as a Short when the creator explicitly uses #shorts.
+    Publishing itself is independent of this label.
+    """
     title = video.get("snippet", {}).get("title", "")
-    # YouTube Shorts can be up to 3 minutes; this is a practical guess,
-    # not a definitive Shorts classification from the API.
-    if duration <= 180 or "#shorts" in title.lower():
-        return "📱 احتمالاً Shorts"
-    return "🎬 ویدیوی لانگ"
+    return "#shorts" in title.lower()
 
 
 def thumbnail_url(snippet):
@@ -111,18 +96,19 @@ def thumbnail_url(snippet):
 
 def load_state():
     if not STATE_FILE.exists():
-        return {"posted_ids": [], "initialized": False}
+        return {"posted_ids": [], "initialized": False, "intro_posted": False}
     try:
         data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        if not isinstance(data.get("posted_ids"), list):
+        if not isinstance(data.get("posted_ids", []), list):
             raise ValueError("Invalid posted_ids")
+        data.setdefault("initialized", False)
+        data.setdefault("intro_posted", False)
         return data
     except Exception as exc:
         raise RuntimeError(f"Could not read {STATE_FILE}: {exc}") from exc
 
 
 def save_state(state):
-    # Keep a bounded history so the state file stays small.
     state["posted_ids"] = state.get("posted_ids", [])[-5000:]
     STATE_FILE.write_text(
         json.dumps(state, ensure_ascii=False, indent=2) + "\n",
@@ -135,11 +121,8 @@ def publish(video):
     snippet = video.get("snippet", {})
     title = html.escape(snippet.get("title", "ویدیوی جدید"))
     url = f"https://www.youtube.com/watch?v={vid}"
-    duration = parse_duration_seconds(video.get("contentDetails", {}).get("duration"))
-    # The public API does not provide a definitive Shorts flag; use a practical heuristic.
-    is_short = duration <= 180 or "#shorts" in snippet.get("title", "").lower()
 
-    if is_short:
+    if is_probable_short(video):
         intro = (
             "⚡️ رفیق، یه شورت تازه رسید! 😎\n"
             "چند ثانیه بیا کنارمون؛ دیدنت کلی انرژی می‌ده 💛🤝"
@@ -150,19 +133,19 @@ def publish(video):
             "🎬 رفقای بامرام، ویدیوی جدیدمون منتشر شد!\n"
             "مثل همیشه دمتون گرم که کنارمونین؛ با حمایت شما با قدرت ادامه می‌دیم ❤️"
         )
-        label = "🍿 ویدیوی لانگ جدید"
+        label = "🍿 ویدیوی جدید"
 
     caption = (
         f"{intro}\n\n"
         f"{label}\n"
         f"🎥 <b>{title}</b>\n\n"
-        "اگه دیدیش، نظرت رو برام بنویس؛ اگه هم خوشت اومد با یه لایک و ساب. "
-        "هوای مارو داشته باش 🌱🫶\n\n"
+        "اگه دیدیش، نظرت رو برام بنویس؛ اگه هم خوشت اومد با یه رفیق به اشتراک بذار. "
+        "هوای همو داریم، مرام همین چیزاست 🌱🫶\n\n"
         f'<a href="{url}">▶️ بزن بریم تماشا</a>\n\n'
         "ممنون که عضوی از این جمعی رفیق 💛"
     )
-    if len(caption) > 1000:
-        caption = caption[:990] + "…"
+    if len(caption) > 1020:
+        caption = caption[:1017] + "…"
 
     thumb = thumbnail_url(snippet)
     if thumb:
@@ -176,12 +159,14 @@ def publish(video):
             return
         except Exception as exc:
             print(f"Thumbnail post failed; falling back to text: {exc}")
+
     telegram("sendMessage", {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": caption,
         "parse_mode": "HTML",
         "disable_web_page_preview": False,
     })
+
 
 def main():
     state = load_state()
@@ -190,18 +175,17 @@ def main():
     videos = get_latest_videos(uploads_playlist)
 
     if not state.get("initialized"):
-        # On the very first run, only publish the newest N items, then mark
-        # the rest of the fetched items as seen to avoid flooding the channel.
         chosen = videos[:max(0, INITIAL_POST_LIMIT)]
         skip = videos[max(0, INITIAL_POST_LIMIT):]
         for video in skip:
             posted.add(video["id"])
         state["initialized"] = True
-        save_state({"posted_ids": list(posted), "initialized": True})
+        state["posted_ids"] = list(posted)
+        save_state(state)
         print(f"First run: publishing up to {len(chosen)} newest video(s).")
     else:
         chosen = [video for video in videos if video["id"] not in posted]
-        chosen.reverse()  # older new items first if multiple arrived between runs
+        chosen.reverse()  # oldest unseen first
 
     sent = 0
     for video in chosen:
@@ -210,12 +194,13 @@ def main():
             continue
         publish(video)
         posted.add(vid)
-        save_state({"posted_ids": list(posted), "initialized": True})
+        state["posted_ids"] = list(posted)
+        save_state(state)
         sent += 1
         print(f"Published: {vid} - {video.get('snippet', {}).get('title', '')}")
 
-    # Persist even if there was nothing new.
-    save_state({"posted_ids": list(posted), "initialized": True})
+    state["posted_ids"] = list(posted)
+    save_state(state)
     print(f"Done. Published {sent} new video(s).")
 
 

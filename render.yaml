@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: sir-mr-yellow-telegram-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python webhook.py
+    healthCheckPath: /health
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_WEBHOOK_SECRET
+        sync: false
+      - key: YOUTUBE_URL
+        value: https://www.youtube.com/@Sir_Mr_yellow138
+      - key: TELEGRAM_URL
+        value: https://t.me/Sirmryellow138
