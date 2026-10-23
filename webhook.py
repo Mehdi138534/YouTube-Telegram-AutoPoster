@@ -1,9 +1,13 @@
+import hmac
+import logging
 import os
 
 import requests
 from flask import Flask, jsonify, request
 
 app = Flask(__name__)
+log = logging.getLogger("webhook")
+logging.basicConfig(level=logging.INFO)
 
 TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 SECRET = os.environ["TELEGRAM_WEBHOOK_SECRET"]
@@ -89,11 +93,20 @@ def health():
 
 @app.post("/telegram")
 def webhook():
-    if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != SECRET:
+    provided = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    if not hmac.compare_digest(provided, SECRET):
         return ("Not found", 404)
 
-    update = request.get_json(silent=True) or {}
+    # Always answer 200 once the request is authentic. A non-200 makes Telegram
+    # resend the same update over and over, so failures are logged instead.
+    try:
+        handle_update(request.get_json(silent=True) or {})
+    except Exception:
+        log.exception("Failed to handle update")
+    return ("OK", 200)
 
+
+def handle_update(update):
     # Inline-button interactions.
     callback = update.get("callback_query") or {}
     if callback:
@@ -120,11 +133,12 @@ def webhook():
                     "chat_id": chat["id"],
                     "message_id": message["message_id"],
                     "text": START_TEXT,
+                    "parse_mode": "HTML",
                     "reply_markup": main_menu(),
                     "disable_web_page_preview": True,
                 })
 
-        return ("OK", 200)
+        return
 
     # Normal messages / commands.
     message = update.get("message") or {}
@@ -132,7 +146,9 @@ def webhook():
     chat = message.get("chat") or {}
 
     if chat.get("type") == "private":
-        command = text.split("@", 1)[0].lower()
+        # "/start something" and "/start@BotName" both count as /start.
+        first_word = text.split()[0] if text else ""
+        command = first_word.split("@", 1)[0].lower()
 
         if command in {"/start", "/about"}:
             telegram("sendMessage", {
@@ -143,9 +159,7 @@ def webhook():
                 "reply_markup": back_menu() if command == "/about" else main_menu(),
             })
 
-    return ("OK", 200)
-
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port)  # local dev only; production uses gunicorn
