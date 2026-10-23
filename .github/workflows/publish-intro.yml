@@ -43,6 +43,7 @@ jobs:
         run: python publish_intro.py
 
       - name: Save introduction state
+        if: always()
         run: |
           if [[ -n "$(git status --porcelain state.json)" ]]; then
             git config user.name "github-actions[bot]"
