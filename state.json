@@ -1,22 +1,5 @@
 {
-  "posted_ids": [
-    "Yw6bMxqsA1M",
-    "7wN1y6M33Gk",
-    "z7Kz-CSFxos",
-    "CnWGRIDYrxw",
-    "pH-08sHcPOA",
-    "UM8L_NdlV9A",
-    "CpUSFbHTRqI",
-    "ikaEGHBzoBg",
-    "wZn7Wq9m-Ik",
-    "6Pze9ZQGlQE",
-    "MxdsTJS4nck",
-    "QXWMsIhN1Go",
-    "bk_zOzYmJ3g",
-    "zO5dfwtgxpk",
-    "5M6184aLoNY"
-  ],
-  "initialized": true,
-  "intro_posted": true,
-  "intro_message_id": 274
+  "posted_ids": [],
+  "initialized": false,
+  "intro_posted": false
 }
