@@ -1,20 +1,5 @@
 {
-  "posted_ids": [
-    "zO5dfwtgxpk",
-    "CpUSFbHTRqI",
-    "z7Kz-CSFxos",
-    "QXWMsIhN1Go",
-    "UM8L_NdlV9A",
-    "CnWGRIDYrxw",
-    "ikaEGHBzoBg",
-    "bk_zOzYmJ3g",
-    "Yw6bMxqsA1M",
-    "5M6184aLoNY",
-    "MxdsTJS4nck",
-    "pH-08sHcPOA",
-    "wZn7Wq9m-Ik",
-    "7wN1y6M33Gk"
-  ],
-  "initialized": true,
+  "posted_ids": [],
+  "initialized": false,
   "intro_posted": false
 }

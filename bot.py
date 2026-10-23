@@ -210,21 +210,46 @@ def video_url(video: dict[str, Any]) -> str:
 
 
 def build_caption(video: dict[str, Any]) -> str:
-    title = (video.get("snippet") or {}).get("title") or "ویدیوی جدید"
-    short = is_probable_short(video)
-    prefix = (
-        "⚡️ رفیق، یه شورت تازه رسید! 😎\nچند ثانیه بیا کنارمون؛ دیدنت کلی انرژی می‌ده 💛🤝"
-        if short else
-        "🎬 رفقای بامرام، ویدیوی جدیدمون منتشر شد!\nمثل همیشه دمتون گرم که کنارمونین ❤️"
+    vid = video["id"]
+    snippet = video.get("snippet", {})
+    title = html.escape(snippet.get("title", "ویدیوی جدید"), quote=False)
+    url = f"https://www.youtube.com/watch?v={vid}"
+
+    if is_probable_short(video):
+        intro = (
+            "⚡️ رفیق، یه شورت تازه رسید! 😎\n"
+            "چند ثانیه بیا کنارمون؛ دیدنت کلی انرژی می‌ده 💛🤝"
+        )
+        label = "📱 شورت جدید"
+    else:
+        intro = (
+            "🎬 رفقای بامرام، ویدیوی جدیدمون منتشر شد!\n"
+            "مثل همیشه دمتون گرم که کنارمونین؛ با حمایت شما با قدرت ادامه می‌دیم ❤️"
+        )
+        label = "🍿 ویدیوی جدید"
+
+    caption = (
+        f"{intro}\n\n"
+        f"{label}\n"
+        f"🎥 <b>{title}</b>\n\n"
+        "اگه دیدیش، نظرت رو برام بنویس؛ اگه هم خوشت اومد با یه لایک و ساب. "
+        "مارو همراهی کن 🌱🫶\n\n"
+        f'<a href="{url}">▶️ بزن بریم تماشا</a>\n\n'
+        "ممنون که عضوی از این جمعی رفیق 💛"
     )
-    label = "📱 شورت جدید" if short else "🍿 ویدیوی جدید"
-    # Keep ample headroom for Telegram's entity parsing and UTF-16 length rules.
-    title = title[:120]
-    caption = f"{prefix}\n\n{label}\n🎥 <b>{html.escape(title, quote=False)}</b>\n\nاگه دیدیش، نظرت رو برامون بنویس؛ حمایتت کلی انرژی می‌ده 🌱🫶"
-    plain = re.sub(r"<[^>]+>", "", caption)
-    plain = html.unescape(plain)
-    if len(plain.encode("utf-16-le")) // 2 > 1024 or len(caption) > 1024:
-        raise BotError("Caption length guard failed")
+    # Telegram captions are limited to 1024 UTF-16 units. Shorten only the title,
+    # and rebuild HTML from escaped text so tags/entities are never cut in half.
+    while len(caption.encode("utf-16-le")) // 2 > 1024 and title:
+        title = html.escape(html.unescape(title)[:-1], quote=False)
+        caption = (
+            f"{intro}\n\n{label}\n🎥 <b>{title}</b>\n\n"
+            "اگه دیدیش، نظرت رو برام بنویس؛ اگه هم خوشت اومد با یه لایک و ساب. "
+            "مارو همراهی کن 🌱🫶\n\n"
+            f'<a href="{url}">▶️ بزن بریم تماشا</a>\n\n'
+            "ممنون که عضوی از این جمعی رفیق 💛"
+        )
+    if len(caption.encode("utf-16-le")) // 2 > 1024:
+        raise BotError("Caption exceeds Telegram's 1024-character limit")
     return caption
 
 
@@ -253,18 +278,34 @@ def publish(video: dict[str, Any], chat_id: str) -> None:
                               "disable_web_page_preview": False, "reply_markup": post_keyboard(video)})
 
 
+def telegram_preflight(chat_id: str) -> None:
+    me = telegram("getMe", {})
+    chat = telegram("getChat", {"chat_id": chat_id})
+    member = telegram("getChatMember", {"chat_id": chat.get("id", chat_id), "user_id": me["id"]})
+    if member.get("status") not in ("administrator", "creator"):
+        raise BotError("Telegram bot is not an admin in the target channel. Add it as admin with permission to post messages.")
+    if member.get("status") == "administrator" and member.get("can_post_messages") is False:
+        raise BotError("Telegram bot is admin but does not have Post Messages permission.")
+    log.info("Telegram ready: bot @%s, channel %s", me.get("username", "unknown"), chat.get("title", chat_id))
+
+
 def main() -> None:
     api_key = required_env("YOUTUBE_API_KEY")
     chat_id = required_env("TELEGRAM_CHAT_ID")
     state = load_state()
+    telegram_preflight(chat_id)
     playlist_id = get_uploads_playlist(api_key)
     videos = fetch_videos(api_key, playlist_id)
-    log.info("Found %d eligible public uploads", len(videos))
+    log.info("Found %d eligible public uploads from @%s", len(videos), HANDLE)
     known = set(state["posted_ids"])
     candidates = [v for v in videos if v["id"] not in known]
     cutoff = datetime.now(timezone.utc) - timedelta(days=MAX_AGE_DAYS)
 
-    if not state.get("initialized"):
+    force_latest = os.getenv("FORCE_LATEST", "").strip().lower() in ("1", "true", "yes", "on")
+    if force_latest:
+        chosen = videos[:max(1, INITIAL_POST_LIMIT)]
+        log.warning("FORCE_LATEST enabled: republishing up to %d latest video(s)", len(chosen))
+    elif not state.get("initialized"):
         eligible = [v for v in candidates if v["_published"] >= cutoff]
         chosen = eligible[:INITIAL_POST_LIMIT]
         ignored = [v for v in candidates if v not in chosen]
@@ -285,6 +326,7 @@ def main() -> None:
     for video in reversed(chosen):  # publish oldest first, including first run
         if sent >= MAX_POSTS_PER_RUN:
             break
+        log.info("Posting video id=%s title=%r", video.get("id"), (video.get("snippet") or {}).get("title", ""))
         publish(video, chat_id)
         append_seen(state, video["id"])
         save_state(state)  # commit each successful post before moving on
