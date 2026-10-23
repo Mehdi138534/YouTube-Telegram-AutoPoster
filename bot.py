@@ -1,255 +1,305 @@
+#!/usr/bin/env python3
+"""Publish new public YouTube uploads to a Telegram channel."""
+from __future__ import annotations
+
 import html
 import json
+import logging
 import os
 import re
 import sys
+import tempfile
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import requests
 
-YOUTUBE_API_KEY = os.environ["YOUTUBE_API_KEY"]
-TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
-CHANNEL_HANDLE = os.getenv("YOUTUBE_HANDLE", "Sir_Mr_yellow138").lstrip("@")
-STATE_FILE = Path("state.json")
-INITIAL_POST_LIMIT = int(os.getenv("INITIAL_POST_LIMIT", "3"))
-MAX_ITEMS = int(os.getenv("MAX_ITEMS", "15"))
-MAX_STATE_IDS = 5000
-SHORT_MAX_SECONDS = 60
-CAPTION_LIMIT = 1024  # Telegram caption limit (characters, after parsing)
-API_BASE = "https://www.googleapis.com/youtube/v3"
-TG_BASE = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("youtube-telegram")
+
+API = "https://www.googleapis.com/youtube/v3"
+STATE_FILE = Path(os.getenv("STATE_FILE", "state.json"))
+HANDLE = os.getenv("YOUTUBE_HANDLE", "Sir_Mr_yellow138").lstrip("@").strip()
+YOUTUBE_URL = os.getenv("YOUTUBE_URL", f"https://www.youtube.com/@{HANDLE}")
+TELEGRAM_URL = os.getenv("TELEGRAM_URL", "https://t.me/Sirmryellow138")
+INITIAL_POST_LIMIT = max(0, int(os.getenv("INITIAL_POST_LIMIT", "3")))
+MAX_ITEMS = max(1, min(50, int(os.getenv("MAX_ITEMS", "15"))))
+MAX_POSTS_PER_RUN = max(1, int(os.getenv("MAX_POSTS_PER_RUN", "5")))
+MAX_AGE_DAYS = max(1, int(os.getenv("MAX_AGE_DAYS", "14")))
+HTTP = requests.Session()
 
 
-def _check(response, what):
-    """Raise an error that says what failed and why, including the API's own message."""
-    if response.ok:
-        return response.json()
+class BotError(RuntimeError):
+    pass
+
+
+def required_env(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise BotError(f"Required environment variable {name} is missing")
+    return value
+
+
+def youtube_json(resource: str, params: dict[str, Any]) -> dict[str, Any]:
     try:
-        body = response.json()
+        response = HTTP.get(f"{API}/{resource}", params=params, timeout=30)
+    except requests.RequestException as exc:
+        raise BotError(f"YouTube API network error ({resource}): {exc}") from exc
+    try:
+        data = response.json()
     except ValueError:
-        body = response.text[:300]
-    raise RuntimeError(f"{what} failed with HTTP {response.status_code}: {body}")
-
-
-def get_json(url, params=None, what="YouTube API request"):
-    response = requests.get(url, params=params, timeout=30)
-    data = _check(response, what)
-    if "error" in data:
-        raise RuntimeError(f"{what} error: {data['error'].get('message', data['error'])}")
+        data = {}
+    if not response.ok or "error" in data:
+        error = data.get("error", {})
+        details = error.get("message") or response.text[:300] or "unknown response"
+        reason = ""
+        errors = error.get("errors") or []
+        if errors:
+            reason = f" ({errors[0].get('reason', 'API error')})"
+        raise BotError(f"YouTube API {resource} failed: HTTP {response.status_code}{reason}: {details}")
     return data
 
 
-def telegram(method, payload):
-    response = requests.post(f"{TG_BASE}/{method}", json=payload, timeout=30)
-    data = _check(response, f"Telegram {method}")
-    if not data.get("ok"):
-        raise RuntimeError(f"Telegram {method} rejected: {data.get('description', data)}")
-    return data["result"]
+def telegram(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+    token = required_env("TELEGRAM_BOT_TOKEN")
+    try:
+        response = HTTP.post(f"https://api.telegram.org/bot{token}/{method}", json=payload, timeout=40)
+    except requests.RequestException as exc:
+        raise BotError(f"Telegram {method} network error: {exc}") from exc
+    try:
+        data = response.json()
+    except ValueError:
+        data = {}
+    if not response.ok or not data.get("ok"):
+        description = data.get("description") or response.text[:300] or "unknown response"
+        code = data.get("error_code", response.status_code)
+        raise BotError(f"Telegram {method} failed ({code}): {description}")
+    return data.get("result") or {}
 
 
-def get_channel():
-    data = get_json(f"{API_BASE}/channels", {
-        "part": "snippet,contentDetails",
-        "forHandle": CHANNEL_HANDLE,
-        "key": YOUTUBE_API_KEY,
-    }, what="YouTube channel lookup")
-    items = data.get("items", [])
+def default_state() -> dict[str, Any]:
+    return {"posted_ids": [], "initialized": False, "intro_posted": False}
+
+
+def load_state() -> dict[str, Any]:
+    if not STATE_FILE.exists():
+        return default_state()
+    try:
+        state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        if not isinstance(state, dict) or not isinstance(state.get("posted_ids", []), list):
+            raise ValueError("unexpected state format")
+        normalized = default_state()
+        normalized.update(state)
+        # Preserve order while removing legacy duplicates.
+        normalized["posted_ids"] = list(dict.fromkeys(str(x) for x in normalized["posted_ids"]))
+        return normalized
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise BotError(f"Cannot read state file {STATE_FILE}: {exc}") from exc
+
+
+def save_state(state: dict[str, Any]) -> None:
+    state["posted_ids"] = list(dict.fromkeys(state.get("posted_ids", [])))[-5000:]
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    # Atomic replace prevents a partial JSON file if the runner exits mid-write.
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{STATE_FILE.name}.", dir=str(STATE_FILE.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as tmp:
+            json.dump(state, tmp, ensure_ascii=False, indent=2)
+            tmp.write("\n")
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        os.replace(tmp_name, STATE_FILE)
+    finally:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+
+
+def append_seen(state: dict[str, Any], video_id: str) -> None:
+    if video_id not in state["posted_ids"]:
+        state["posted_ids"].append(video_id)
+
+
+def get_uploads_playlist(api_key: str) -> str:
+    result = youtube_json("channels", {"part": "snippet,contentDetails", "forHandle": HANDLE, "key": api_key})
+    items = result.get("items", [])
     if not items:
-        raise RuntimeError(
-            f"Channel @{CHANNEL_HANDLE} not found. Check YOUTUBE_HANDLE and the API key."
-        )
-    return items[0]["contentDetails"]["relatedPlaylists"]["uploads"]
+        raise BotError(f"YouTube channel @{HANDLE} was not found. Check YOUTUBE_HANDLE and API key.")
+    try:
+        return items[0]["contentDetails"]["relatedPlaylists"]["uploads"]
+    except (KeyError, TypeError) as exc:
+        raise BotError("YouTube API did not return the uploads playlist for this channel") from exc
 
 
-def get_latest_videos(uploads_playlist):
-    data = get_json(f"{API_BASE}/playlistItems", {
-        "part": "snippet,contentDetails",
-        "playlistId": uploads_playlist,
-        "maxResults": min(MAX_ITEMS, 50),
-        "key": YOUTUBE_API_KEY,
-    }, what="YouTube playlist lookup")
-    items = data.get("items", [])
-    ids = [x.get("contentDetails", {}).get("videoId") for x in items]
-    ids = [x for x in ids if x]
+def parse_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def fetch_videos(api_key: str, playlist_id: str) -> list[dict[str, Any]]:
+    playlist = youtube_json("playlistItems", {
+        "part": "snippet,contentDetails", "playlistId": playlist_id,
+        "maxResults": MAX_ITEMS, "key": api_key,
+    })
+    ids = []
+    for item in playlist.get("items", []):
+        video_id = (item.get("contentDetails") or {}).get("videoId")
+        if video_id and video_id not in ids:
+            ids.append(video_id)
     if not ids:
         return []
-
-    details = get_json(f"{API_BASE}/videos", {
-        "part": "snippet,contentDetails,liveStreamingDetails",
-        "id": ",".join(ids),
-        "key": YOUTUBE_API_KEY,
-    }, what="YouTube video details lookup")
-    by_id = {v["id"]: v for v in details.get("items", [])}
-
+    details = youtube_json("videos", {"part": "snippet,contentDetails,status", "id": ",".join(ids), "key": api_key})
+    by_id = {item.get("id"): item for item in details.get("items", []) if item.get("id")}
     videos = []
-    for vid in ids:  # playlist order is newest-first and is preserved here
-        if vid in by_id:
-            videos.append(by_id[vid])
-    return videos
+    for video_id in ids:  # playlist order is newest first
+        item = by_id.get(video_id)
+        if not item:
+            continue
+        snippet = item.get("snippet") or {}
+        status = item.get("status") or {}
+        live_status = snippet.get("liveBroadcastContent", "none")
+        published = parse_datetime(snippet.get("publishedAt"))
+        if status.get("privacyStatus") not in (None, "public"):
+            continue
+        if live_status in ("live", "upcoming"):
+            log.info("Skipping %s: broadcast status is %s", video_id, live_status)
+            continue
+        if not published or published > datetime.now(timezone.utc) + timedelta(minutes=2):
+            log.info("Skipping %s: not published yet", video_id)
+            continue
+        item["_published"] = published
+        videos.append(item)
+    return sorted(videos, key=lambda v: v["_published"], reverse=True)
 
 
-def is_not_ready(video):
-    """Upcoming premieres and scheduled lives are skipped until they actually go live or upload.
-    They are not marked as posted, so they get picked up on a later run.
-    """
-    status = video.get("snippet", {}).get("liveBroadcastContent", "none")
-    return status in ("upcoming", "live")
+def is_probable_short(video: dict[str, Any]) -> bool:
+    """Shorts classification is heuristic: YouTube's public API has no Shorts flag."""
+    snippet = video.get("snippet") or {}
+    title = snippet.get("title", "")
+    tags = " ".join(snippet.get("tags", []) or [])
+    text = f"{title} {tags}"
+    explicit = bool(re.search(r"(?:^|\s)#shorts?(?:\s|$)", text, flags=re.I))
+    duration = (video.get("contentDetails") or {}).get("duration")
+    seconds = None
+    if duration:
+        match = re.fullmatch(r"P(?:\d+D)?T(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?", duration)
+        if match:
+            hours, minutes, secs = (float(value or 0) for value in match.groups())
+            seconds = hours * 3600 + minutes * 60 + secs
+    return explicit or (seconds is not None and 0 < seconds <= 180)
 
 
-def duration_seconds(video):
-    raw = video.get("contentDetails", {}).get("duration", "")
-    match = re.fullmatch(r"P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", raw)
-    if not match:
-        return None
-    days, hours, minutes, seconds = (int(g or 0) for g in match.groups())
-    return days * 86400 + hours * 3600 + minutes * 60 + seconds
-
-
-def is_short(video):
-    """The public API has no Shorts flag. Heuristic: #shorts in the title, or a very short duration."""
-    title = video.get("snippet", {}).get("title", "").lower()
-    if "#shorts" in title:
-        return True
-    seconds = duration_seconds(video)
-    return seconds is not None and 0 < seconds <= SHORT_MAX_SECONDS
-
-
-def thumbnail_url(snippet):
-    thumbs = snippet.get("thumbnails", {})
+def thumbnail_url(video: dict[str, Any]) -> str | None:
+    thumbnails = (video.get("snippet") or {}).get("thumbnails") or {}
     for key in ("maxres", "standard", "high", "medium", "default"):
-        if thumbs.get(key, {}).get("url"):
-            return thumbs[key]["url"]
+        url = (thumbnails.get(key) or {}).get("url")
+        if url:
+            return url
     return None
 
 
-def load_state():
-    if not STATE_FILE.exists():
-        return {"posted_ids": [], "initialized": False, "intro_posted": False}
-    try:
-        data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"Could not parse {STATE_FILE}: {exc}") from exc
-    if not isinstance(data.get("posted_ids", []), list):
-        raise RuntimeError(f"{STATE_FILE} has an invalid posted_ids field")
-    data.setdefault("posted_ids", [])
-    data.setdefault("initialized", False)
-    data.setdefault("intro_posted", False)
-    return data
+def video_url(video: dict[str, Any]) -> str:
+    short = is_probable_short(video)
+    return f"https://www.youtube.com/{'shorts/' if short else 'watch?v='}{video['id']}"
 
 
-def save_state(state):
-    # Keep order (oldest first) and drop the oldest entries when over the cap.
-    state["posted_ids"] = list(dict.fromkeys(state.get("posted_ids", [])))[-MAX_STATE_IDS:]
-    STATE_FILE.write_text(
-        json.dumps(state, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
+def build_caption(video: dict[str, Any]) -> str:
+    title = (video.get("snippet") or {}).get("title") or "ویدیوی جدید"
+    short = is_probable_short(video)
+    prefix = (
+        "⚡️ رفیق، یه شورت تازه رسید! 😎\nچند ثانیه بیا کنارمون؛ دیدنت کلی انرژی می‌ده 💛🤝"
+        if short else
+        "🎬 رفقای بامرام، ویدیوی جدیدمون منتشر شد!\nمثل همیشه دمتون گرم که کنارمونین ❤️"
     )
-
-
-def build_caption(video):
-    snippet = video.get("snippet", {})
-    vid = video["id"]
-    short = is_short(video)
-    url = f"https://www.youtube.com/shorts/{vid}" if short else f"https://www.youtube.com/watch?v={vid}"
-
-    # Trim the raw title before escaping so no HTML entity or tag is ever cut in half.
-    raw_title = snippet.get("title", "ویدیوی جدید").strip()
-    if len(raw_title) > 150:
-        raw_title = raw_title[:147].rstrip() + "..."
-    title = html.escape(raw_title)
-
-    if short:
-        intro = (
-            "⚡️ رفیق، یه شورت تازه رسید! 😎\n"
-            "چند ثانیه بیا کنارمون؛ دیدنت کلی انرژی می‌ده 💛🤝"
-        )
-        label = "📱 شورت جدید"
-    else:
-        intro = (
-            "🎬 رفقای بامرام، ویدیوی جدیدمون منتشر شد!\n"
-            "مثل همیشه دمتون گرم که کنارمونین؛ با حمایت شما با قدرت ادامه می‌دیم ❤️"
-        )
-        label = "🍿 ویدیوی جدید"
-
-    caption = (
-        f"{intro}\n\n"
-        f"{label}\n"
-        f"🎥 <b>{title}</b>\n\n"
-        "اگه دیدیش، نظرت رو برام بنویس؛ اگه هم خوشت اومد با یه لایک و ساب. "
-        "مارو همراهی کن 🌱🫶\n\n"
-        f'<a href="{url}">▶️ بزن بریم تماشا</a>\n\n'
-        "ممنون که عضوی از این جمعی رفیق 💛"
-    )
-    if len(caption) > CAPTION_LIMIT:
-        raise RuntimeError(f"Caption is too long ({len(caption)} chars) for video {vid}")
+    label = "📱 شورت جدید" if short else "🍿 ویدیوی جدید"
+    # Keep ample headroom for Telegram's entity parsing and UTF-16 length rules.
+    title = title[:120]
+    caption = f"{prefix}\n\n{label}\n🎥 <b>{html.escape(title, quote=False)}</b>\n\nاگه دیدیش، نظرت رو برامون بنویس؛ حمایتت کلی انرژی می‌ده 🌱🫶"
+    plain = re.sub(r"<[^>]+>", "", caption)
+    plain = html.unescape(plain)
+    if len(plain.encode("utf-16-le")) // 2 > 1024 or len(caption) > 1024:
+        raise BotError("Caption length guard failed")
     return caption
 
 
-def publish(video):
+def post_keyboard(video: dict[str, Any]) -> dict[str, Any]:
+    return {"inline_keyboard": [
+        [{"text": "🍿 پخشش کن!", "url": video_url(video)}],
+        [{"text": "📺 کانال یوتیوب Sir Mr Yellow", "url": YOUTUBE_URL}],
+    ]}
+
+
+def publish(video: dict[str, Any], chat_id: str) -> None:
     caption = build_caption(video)
-    thumb = thumbnail_url(video.get("snippet", {}))
-    if thumb:
+    payload = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML", "reply_markup": post_keyboard(video)}
+    photo = thumbnail_url(video)
+    if photo:
         try:
-            telegram("sendPhoto", {
-                "chat_id": TELEGRAM_CHAT_ID,
-                "photo": thumb,
-                "caption": caption,
-                "parse_mode": "HTML",
-            })
+            telegram("sendPhoto", {**payload, "photo": photo})
             return
-        except Exception as exc:
-            print(f"Thumbnail post failed, falling back to text: {exc}")
+        except BotError as exc:
+            # Only retry a definite bad-photo response. Network/429/server failures may
+            # have reached Telegram already, so falling back could create duplicate posts.
+            if "failed (400)" not in str(exc):
+                raise
+            log.warning("Thumbnail rejected; trying text post instead: %s", exc)
+    telegram("sendMessage", {"chat_id": chat_id, "text": caption, "parse_mode": "HTML",
+                              "disable_web_page_preview": False, "reply_markup": post_keyboard(video)})
 
-    telegram("sendMessage", {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": caption,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": False,
-    })
 
-
-def main():
+def main() -> None:
+    api_key = required_env("YOUTUBE_API_KEY")
+    chat_id = required_env("TELEGRAM_CHAT_ID")
     state = load_state()
-    posted = list(dict.fromkeys(state.get("posted_ids", [])))
-    posted_set = set(posted)
-
-    uploads_playlist = get_channel()
-    videos = [v for v in get_latest_videos(uploads_playlist) if not is_not_ready(v)]
+    playlist_id = get_uploads_playlist(api_key)
+    videos = fetch_videos(api_key, playlist_id)
+    log.info("Found %d eligible public uploads", len(videos))
+    known = set(state["posted_ids"])
+    candidates = [v for v in videos if v["id"] not in known]
+    cutoff = datetime.now(timezone.utc) - timedelta(days=MAX_AGE_DAYS)
 
     if not state.get("initialized"):
-        chosen = videos[:max(0, INITIAL_POST_LIMIT)]
-        for video in videos[max(0, INITIAL_POST_LIMIT):]:
-            if video["id"] not in posted_set:
-                posted.append(video["id"])
-                posted_set.add(video["id"])
-        state["initialized"] = True
-        state["posted_ids"] = posted
+        eligible = [v for v in candidates if v["_published"] >= cutoff]
+        chosen = eligible[:INITIAL_POST_LIMIT]
+        ignored = [v for v in candidates if v not in chosen]
+        # Persist skipped old/excess items before attempting posts, but keep initialized false
+        # so a failed first-run post is picked up again next run.
+        for video in ignored:
+            append_seen(state, video["id"])
         save_state(state)
-        print(f"First run: publishing up to {len(chosen)} newest video(s).")
+        log.info("First run: publishing up to %d newest eligible video(s)", len(chosen))
     else:
-        chosen = [video for video in videos if video["id"] not in posted_set]
-        chosen.reverse()  # oldest unseen first
+        chosen = [v for v in candidates if v["_published"] >= cutoff]
+        for video in candidates:
+            if video["_published"] < cutoff:
+                append_seen(state, video["id"])
+        save_state(state)
 
     sent = 0
-    for video in chosen:
-        vid = video["id"]
-        if vid in posted_set:
-            continue
-        publish(video)  # if this raises, state for earlier videos is already saved
-        posted.append(vid)
-        posted_set.add(vid)
-        state["posted_ids"] = posted
-        save_state(state)
+    for video in reversed(chosen):  # publish oldest first, including first run
+        if sent >= MAX_POSTS_PER_RUN:
+            break
+        publish(video, chat_id)
+        append_seen(state, video["id"])
+        save_state(state)  # commit each successful post before moving on
         sent += 1
-        print(f"Published: {vid} - {video.get('snippet', {}).get('title', '')}")
+        log.info("Published %s: %s", video["id"], (video.get("snippet") or {}).get("title", ""))
 
-    print(f"Done. Published {sent} new video(s).")
+    # First-run candidates beyond the per-run cap must not be marked seen; they'll be picked up next run.
+    state["initialized"] = True
+    save_state(state)
+    log.info("Done. Published %d new video(s).", sent)
 
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        log.error("Bot stopped: %s", exc)
         sys.exit(1)

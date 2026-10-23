@@ -4,13 +4,13 @@ services:
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn -w 1 -b 0.0.0.0:$PORT webhook:app
+    startCommand: gunicorn --workers 2 --threads 4 --timeout 30 --bind 0.0.0.0:$PORT webhook:app
     healthCheckPath: /health
     envVars:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: TELEGRAM_WEBHOOK_SECRET
-        sync: false
+        generateValue: true
       - key: YOUTUBE_URL
         value: https://www.youtube.com/@Sir_Mr_yellow138
       - key: TELEGRAM_URL

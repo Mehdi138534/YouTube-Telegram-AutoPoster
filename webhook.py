@@ -1,3 +1,4 @@
+"""Telegram webhook for the private /start and /about menu."""
 import hmac
 import logging
 import os
@@ -5,80 +6,52 @@ import os
 import requests
 from flask import Flask, jsonify, request
 
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("telegram-webhook")
 app = Flask(__name__)
-log = logging.getLogger("webhook")
-logging.basicConfig(level=logging.INFO)
 
-TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-SECRET = os.environ["TELEGRAM_WEBHOOK_SECRET"]
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
 YOUTUBE_URL = os.getenv("YOUTUBE_URL", "https://www.youtube.com/@Sir_Mr_yellow138")
 TELEGRAM_URL = os.getenv("TELEGRAM_URL", "https://t.me/Sirmryellow138")
-TG_BASE = f"https://api.telegram.org/bot{TOKEN}"
-
 
 START_TEXT = (
-    "🤖 <b>من کی‌ام؟</b>\n\n"
-    "سلام رفیق! 👋💛\n"
-    "من باتِ <b>Sir Mr Yellow</b> ـم؛ اومدم که نذارم هیچ ویدیوی جدیدی از رفیقت از دستت در بره! 😎🔥\n\n"
-    "کار من خیلی ساده‌ست:\n\n"
-    "🎬 هر وقت توی کانال یوتیوب <b>Sir Mr Yellow</b> یه ویدیوی جدید منتشر بشه، من می‌رم سراغش و خبرشو توی کانال تلگرام می‌ذارم.\n\n"
-    "📢 ویدیوهای معمولی و <b>Shorts</b> رو هم پوشش می‌دم.\n\n"
-    "🔗 لینک ویدیو رو برات می‌ذارم و تا جای ممکن عکس بندانگشتی و اطلاعات ویدیو رو هم همراهش می‌فرستم.\n\n"
-    "⏰ کانال یوتیوب رو مرتب بررسی می‌کنم تا ویدیوهای جدید رو سریع بهت برسونم.\n\n"
-    "💛 خلاصه که من اینجام تا تو فقط بشینی و حال کنی؛ پیدا کردن و خبر دادن ویدیوهای جدید با من!\n\n"
-    "اگه رفیق <b>Sir Mr Yellow</b> هستی، خوش اومدی داداش! 😎💛\n"
-    "دمت گرم که همراهمونی 🌱"
+    "🤖 <b>من کی‌ام؟</b>\n\nسلام رفیق! 👋💛\n"
+    "من باتِ <b>Sir Mr Yellow</b> ـم؛ یه رفیق خودمونی که حواسش به ویدیوهای تازه‌ی کاناله 😎\n\n"
+    "🎬 هر وقت ویدیوی عمومی تازه‌ای منتشر بشه، خبر و لینک تماشاش رو توی کانال تلگرام می‌ذارم.\n"
+    "📱 ویدیوهای معمولی و شورت‌ها رو پوشش می‌دم؛ تشخیص شورت تقریبیه چون API رسمی یوتیوب برچسب قطعی نداره.\n\n"
+    "💛 تو فقط نوتیفیکیشن کانال رو روشن کن و حال کن؛ خبررسانی با من! دمت گرم که همراهمونی 🌱"
 )
-
 ABOUT_TEXT = (
-    "🤖 <b>درباره بات Sir Mr Yellow</b>\n\n"
-    "سلام رفیق! 👋💛\n"
-    "من باتِ Sir Mr Yellow ـم؛ یه رفیق کوچیک که اومده نذاره هیچ ویدیوی جدیدی از کانالمون از دستت در بره! 😎🔥\n\n"
-    "<b>کار من چیه؟</b>\n"
-    "🎬 هر وقت ویدیوی جدیدی روی یوتیوب منتشر بشه، من خبرش رو توی کانال تلگرام می‌رسونم.\n"
-    "📱 ویدیوهای معمولی و Shorts رو هم پوشش می‌دیم.\n"
-    "🖼️ تا جای ممکن عکس بندانگشتی و لینک مستقیم ویدیو هم همراه پست میاد.\n"
-    "⏰ کانال یوتیوب مرتب بررسی می‌شه تا ویدیوهای تازه رو سریع به دستت برسونیم.\n\n"
-    "خلاصه رفیق، تو فقط بشین و حال کن؛\n"
-    "پیدا کردن و خبر دادن ویدیوهای جدید با من! 😎🤝\n\n"
-    "💛 مرام ما اینه که نذاریم از جمع جا بمونی.\n"
-    "دمت گرم که کنارمونی! 🌱"
+    "🤖 <b>درباره بات Sir Mr Yellow</b>\n\nسلام رفیق! 👋\n"
+    "من ویدیوهای عمومی تازه‌ی کانال یوتیوب Sir Mr Yellow رو بررسی می‌کنم و لینک‌شون رو با یه پیام صمیمی توی تلگرام می‌ذارم.\n\n"
+    "برای دیدن آخرین پست‌ها، کانال تلگرام رو دنبال کن 💛"
 )
 
 
-def telegram(method, payload):
-    r = requests.post(f"{TG_BASE}/{method}", json=payload, timeout=20)
-    r.raise_for_status()
-    data = r.json()
+def tg_call(method, payload):
+    if not TOKEN:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN is not configured")
+    response = requests.post(f"https://api.telegram.org/bot{TOKEN}/{method}", json=payload, timeout=15)
+    response.raise_for_status()
+    data = response.json()
     if not data.get("ok"):
-        raise RuntimeError(data)
-    return data["result"]
+        raise RuntimeError(f"Telegram {method}: {data.get('description', 'unknown error')}")
+    return data.get("result")
 
 
-def main_menu():
-    return {
-        "inline_keyboard": [
-            [
-                {"text": "🤖 درباره بات", "callback_data": "about_bot"},
-            ],
-            [
-                {"text": "🎬 کانال یوتیوب", "url": YOUTUBE_URL},
-                {"text": "📢 کانال تلگرام", "url": TELEGRAM_URL},
-            ],
-        ]
-    }
+def menu():
+    return {"inline_keyboard": [
+        [{"text": "🤖 درباره بات", "callback_data": "about"}],
+        [{"text": "🎬 کانال یوتیوب", "url": YOUTUBE_URL}, {"text": "📢 کانال تلگرام", "url": TELEGRAM_URL}],
+    ]}
 
 
 def back_menu():
-    return {
-        "inline_keyboard": [
-            [{"text": "💛 برگشت به منوی اصلی", "callback_data": "main_menu"}],
-            [
-                {"text": "🎬 یوتیوب", "url": YOUTUBE_URL},
-                {"text": "📢 تلگرام", "url": TELEGRAM_URL},
-            ],
-        ]
-    }
+    return {"inline_keyboard": [
+        [{"text": "💛 برگشت به منوی اصلی", "callback_data": "home"}],
+        [{"text": "🎬 یوتیوب", "url": YOUTUBE_URL}, {"text": "📢 تلگرام", "url": TELEGRAM_URL}],
+    ]}
 
 
 @app.get("/")
@@ -93,73 +66,45 @@ def health():
 
 @app.post("/telegram")
 def webhook():
-    provided = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-    if not hmac.compare_digest(provided, SECRET):
-        return ("Not found", 404)
-
-    # Always answer 200 once the request is authentic. A non-200 makes Telegram
-    # resend the same update over and over, so failures are logged instead.
+    if not SECRET or not hmac.compare_digest(request.headers.get("X-Telegram-Bot-Api-Secret-Token", ""), SECRET):
+        return ("Forbidden", 403)
+    update = request.get_json(silent=True) or {}
     try:
-        handle_update(request.get_json(silent=True) or {})
+        callback = update.get("callback_query") or {}
+        if callback:
+            callback_id = callback.get("id")
+            if callback_id:
+                tg_call("answerCallbackQuery", {"callback_query_id": callback_id})
+            message = callback.get("message") or {}
+            chat = message.get("chat") or {}
+            if chat.get("type") == "private" and message.get("message_id"):
+                data = callback.get("data")
+                if data in ("about", "home"):
+                    tg_call("editMessageText", {
+                        "chat_id": chat["id"], "message_id": message["message_id"],
+                        "text": ABOUT_TEXT if data == "about" else START_TEXT,
+                        "parse_mode": "HTML", "disable_web_page_preview": True,
+                        "reply_markup": back_menu() if data == "about" else menu(),
+                    })
+            return ("OK", 200)
+
+        message = update.get("message") or {}
+        text = (message.get("text") or "").strip()
+        chat = message.get("chat") or {}
+        if chat.get("type") == "private" and text.startswith("/"):
+            command = text.split()[0].split("@", 1)[0].lower()
+            if command in ("/start", "/about"):
+                tg_call("sendMessage", {
+                    "chat_id": chat["id"], "text": START_TEXT if command == "/start" else ABOUT_TEXT,
+                    "parse_mode": "HTML", "disable_web_page_preview": True,
+                    "reply_markup": menu() if command == "/start" else back_menu(),
+                })
     except Exception:
-        log.exception("Failed to handle update")
+        # Acknowledge valid updates even if Telegram's API is temporarily failing, to avoid
+        # endless webhook redelivery and duplicate replies. Details stay in server logs.
+        log.exception("Could not process Telegram update %s", update.get("update_id", "unknown"))
     return ("OK", 200)
 
 
-def handle_update(update):
-    # Inline-button interactions.
-    callback = update.get("callback_query") or {}
-    if callback:
-        callback_id = callback.get("id")
-        data = callback.get("data")
-        message = callback.get("message") or {}
-        chat = message.get("chat") or {}
-
-        if callback_id:
-            telegram("answerCallbackQuery", {"callback_query_id": callback_id})
-
-        if chat.get("type") == "private":
-            if data == "about_bot":
-                telegram("editMessageText", {
-                    "chat_id": chat["id"],
-                    "message_id": message["message_id"],
-                    "text": ABOUT_TEXT,
-                    "parse_mode": "HTML",
-                    "disable_web_page_preview": True,
-                    "reply_markup": back_menu(),
-                })
-            elif data == "main_menu":
-                telegram("editMessageText", {
-                    "chat_id": chat["id"],
-                    "message_id": message["message_id"],
-                    "text": START_TEXT,
-                    "parse_mode": "HTML",
-                    "reply_markup": main_menu(),
-                    "disable_web_page_preview": True,
-                })
-
-        return
-
-    # Normal messages / commands.
-    message = update.get("message") or {}
-    text = (message.get("text") or "").strip()
-    chat = message.get("chat") or {}
-
-    if chat.get("type") == "private":
-        # "/start something" and "/start@BotName" both count as /start.
-        first_word = text.split()[0] if text else ""
-        command = first_word.split("@", 1)[0].lower()
-
-        if command in {"/start", "/about"}:
-            telegram("sendMessage", {
-                "chat_id": chat["id"],
-                "text": START_TEXT if command == "/start" else ABOUT_TEXT,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": True,
-                "reply_markup": back_menu() if command == "/about" else main_menu(),
-            })
-
-
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port)  # local dev only; production uses gunicorn
+    raise SystemExit("Run with gunicorn, not Flask's development server")
