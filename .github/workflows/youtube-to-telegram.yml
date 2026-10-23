@@ -1,6 +1,12 @@
 name: YouTube to Telegram
 on:
   workflow_dispatch:
+    inputs:
+      force_latest:
+        description: "Send latest videos again for testing, even if marked as posted"
+        type: boolean
+        required: false
+        default: false
   schedule:
     - cron: "*/10 * * * *"
 permissions:
@@ -29,7 +35,8 @@ jobs:
           YOUTUBE_HANDLE: Sir_Mr_yellow138
           INITIAL_POST_LIMIT: "3"
           MAX_ITEMS: "15"
-        run: python bot.py
+          FORCE_LATEST: ${{ inputs.force_latest }}
+        run: python -u bot.py
       - name: Persist state even if publishing fails
         if: always()
         run: |
