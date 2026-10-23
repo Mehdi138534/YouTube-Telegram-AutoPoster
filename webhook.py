@@ -13,11 +13,17 @@ TG_BASE = f"https://api.telegram.org/bot{TOKEN}"
 
 
 START_TEXT = (
-    "💛 سلام رفیق! خوش اومدی به خونه‌ی Sir Mr Yellow! 👋\n\n"
-    "من بات رفیقِ کانالمونم و اینجام که نذارم ویدیوهای جدیدمون رو از دست بدی. 🎬🔥\n\n"
-    "هر وقت یه ویدیوی تازه روی یوتیوب منتشر بشه، خبرش رو توی کانال تلگرام می‌ذاریم.\n\n"
-    "اگه می‌خوای بدونی دقیقاً کار من چیه، روی «🤖 درباره بات» بزن.\n\n"
-    "دمت گرم که همراه مایی رفیق! 💛🤝"
+    "🤖 <b>من کی‌ام؟</b>\n\n"
+    "سلام رفیق! 👋💛\n"
+    "من باتِ <b>Sir Mr Yellow</b> ـم؛ اومدم که نذارم هیچ ویدیوی جدیدی از رفیقت از دستت در بره! 😎🔥\n\n"
+    "کار من خیلی ساده‌ست:\n\n"
+    "🎬 هر وقت توی کانال یوتیوب <b>Sir Mr Yellow</b> یه ویدیوی جدید منتشر بشه، من می‌رم سراغش و خبرشو توی کانال تلگرام می‌ذارم.\n\n"
+    "📢 ویدیوهای معمولی و <b>Shorts</b> رو هم پوشش می‌دم.\n\n"
+    "🔗 لینک ویدیو رو برات می‌ذارم و تا جای ممکن عکس بندانگشتی و اطلاعات ویدیو رو هم همراهش می‌فرستم.\n\n"
+    "⏰ کانال یوتیوب رو مرتب بررسی می‌کنم تا ویدیوهای جدید رو سریع بهت برسونم.\n\n"
+    "💛 خلاصه که من اینجام تا تو فقط بشینی و حال کنی؛ پیدا کردن و خبر دادن ویدیوهای جدید با من!\n\n"
+    "اگه رفیق <b>Sir Mr Yellow</b> هستی، خوش اومدی داداش! 😎💛\n"
+    "دمت گرم که همراهمونی 🌱"
 )
 
 ABOUT_TEXT = (
@@ -81,9 +87,9 @@ def health():
     return jsonify({"ok": True})
 
 
-@app.post(f"/telegram/<path:secret>")
-def webhook(secret):
-    if secret != SECRET:
+@app.post("/telegram")
+def webhook():
+    if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != SECRET:
         return ("Not found", 404)
 
     update = request.get_json(silent=True) or {}
@@ -131,7 +137,7 @@ def webhook(secret):
         if command in {"/start", "/about"}:
             telegram("sendMessage", {
                 "chat_id": chat["id"],
-                "text": ABOUT_TEXT if command == "/about" else START_TEXT,
+                "text": START_TEXT if command == "/start" else ABOUT_TEXT,
                 "parse_mode": "HTML",
                 "disable_web_page_preview": True,
                 "reply_markup": back_menu() if command == "/about" else main_menu(),

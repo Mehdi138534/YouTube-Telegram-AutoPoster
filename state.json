@@ -1,6 +1,5 @@
 {
   "posted_ids": [],
   "initialized": false,
-  "intro_posted": true,
-  "intro_message_id": 265
+  "intro_posted": false
 }

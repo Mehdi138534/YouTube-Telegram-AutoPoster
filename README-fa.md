@@ -81,10 +81,10 @@ GitHub Actions زمان‌بندی‌شده دائماً روشن نیست و ن
 
 Render برای سرویس یک آدرس HTTPS می‌دهد.
 
-بعد باید webhook تلگرام را روی این مسیر تنظیم کنی:
+بعد باید webhook تلگرام را روی این مسیر تنظیم کنی. اسکریپت `set_webhook.py` خودش `/telegram` را به آدرس اضافه می‌کند و Secret را به‌صورت امن در Header استاندارد Telegram ثبت می‌کند:
 
 ```text
-https://YOUR-RENDER-DOMAIN/telegram/YOUR-SECRET
+https://YOUR-RENDER-DOMAIN/telegram
 ```
 
 بعد از تنظیم، Telegram آپدیت‌های بات را به این آدرس POST می‌کند و `/start` پاسخ می‌گیرد.
@@ -93,7 +93,7 @@ https://YOUR-RENDER-DOMAIN/telegram/YOUR-SECRET
 
 ```text
 TELEGRAM_BOT_TOKEN=توکن-بات
-TELEGRAM_WEBHOOK_URL=https://YOUR-RENDER-DOMAIN/telegram/YOUR-SECRET
+TELEGRAM_WEBHOOK_URL=https://YOUR-RENDER-DOMAIN/telegram
 ```
 
 این کار توکن را داخل GitHub یا کد ذخیره نمی‌کند.
