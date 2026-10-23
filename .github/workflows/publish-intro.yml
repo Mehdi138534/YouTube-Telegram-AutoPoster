@@ -1,0 +1,53 @@
+name: Publish Telegram Intro
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Publish again even if state.json says it was already posted"
+        required: false
+        default: "false"
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: youtube-telegram-publisher
+  cancel-in-progress: false
+
+jobs:
+  intro:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Publish introduction
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          YOUTUBE_URL: "https://www.youtube.com/@Sir_Mr_yellow138"
+          TELEGRAM_URL: "https://t.me/Sirmryellow138"
+          FORCE_INTRO: ${{ inputs.force && '1' || '0' }}
+        run: python publish_intro.py
+
+      - name: Save introduction state
+        run: |
+          if [[ -n "$(git status --porcelain state.json)" ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add state.json
+            git commit -m "Mark Telegram intro as posted [skip ci]"
+            git push
+          fi
