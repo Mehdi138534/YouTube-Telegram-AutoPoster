@@ -134,20 +134,36 @@ def publish(video):
     vid = video["id"]
     snippet = video.get("snippet", {})
     title = html.escape(snippet.get("title", "ویدیوی جدید"))
-    description = snippet.get("description", "").strip()
-    if len(description) > 500:
-        description = description[:497] + "..."
-    description = html.escape(description)
     url = f"https://www.youtube.com/watch?v={vid}"
-    label = content_label(video)
-    caption = f"{label}\n<b>{title}</b>\n\n"
-    if description:
-        caption += f"{description}\n\n"
-    caption += f'<a href="{url}">▶️ تماشای ویدیو در یوتیوب</a>'
+    duration = parse_duration_seconds(video.get("contentDetails", {}).get("duration"))
+    # The public API does not provide a definitive Shorts flag; use a practical heuristic.
+    is_short = duration <= 180 or "#shorts" in snippet.get("title", "").lower()
 
-    # Telegram photo captions have a 1024-character limit.
+    if is_short:
+        intro = (
+            "⚡️ رفیق، یه شورت تازه رسید! 😎\n"
+            "چند ثانیه بیا کنارمون؛ دیدنت کلی انرژی می‌ده 💛🤝"
+        )
+        label = "📱 شورت جدید"
+    else:
+        intro = (
+            "🎬 رفقای بامرام، ویدیوی جدیدمون منتشر شد!\n"
+            "مثل همیشه دمتون گرم که کنارمونین؛ با حمایت شما با قدرت ادامه می‌دیم ❤️"
+        )
+        label = "🍿 ویدیوی لانگ جدید"
+
+    caption = (
+        f"{intro}\n\n"
+        f"{label}\n"
+        f"🎥 <b>{title}</b>\n\n"
+        "اگه دیدیش، نظرت رو برام بنویس؛ اگه هم خوشت اومد با یه رفیق به اشتراک بذار. "
+        "هوای همو داریم، مرام همین چیزاست 🌱🫶\n\n"
+        f'<a href="{url}">▶️ بزن بریم تماشا</a>\n\n'
+        "ممنون که عضوی از این جمعی رفیق 💛"
+    )
     if len(caption) > 1000:
         caption = caption[:990] + "…"
+
     thumb = thumbnail_url(snippet)
     if thumb:
         try:
@@ -166,7 +182,6 @@ def publish(video):
         "parse_mode": "HTML",
         "disable_web_page_preview": False,
     })
-
 
 def main():
     state = load_state()
