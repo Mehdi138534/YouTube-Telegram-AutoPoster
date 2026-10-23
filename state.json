@@ -1,6 +1,10 @@
 {
-  "posted_ids": [],
-  "initialized": false,
+  "posted_ids": [
+    "z7Kz-CSFxos",
+    "CpUSFbHTRqI",
+    "zO5dfwtgxpk"
+  ],
+  "initialized": true,
   "intro_posted": true,
   "intro_message_id": 276
 }
